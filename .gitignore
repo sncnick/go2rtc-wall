@@ -1,0 +1,15 @@
+.env
+config/cameras.json
+data/
+node_modules/
+*.sqlite*
+.DS_Store
+
+# Local secrets, logs, and screenshots from live sessions
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+access-log*.csv
+docs/*.png

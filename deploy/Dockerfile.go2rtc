@@ -1,0 +1,8 @@
+FROM alexxit/go2rtc:1.9.15@sha256:e098de5c2f8040dc3d4784ed2d5cfdac3b0979f9349afe587ef6a670a14b9f4d AS upstream
+# Keep only the streaming binary: no shell, ffmpeg, package manager or startup scripts.
+FROM scratch
+COPY --from=upstream /usr/local/bin/go2rtc /go2rtc
+COPY --from=upstream /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 1000:1000
+ENTRYPOINT ["/go2rtc"]
+CMD ["-c", "/config/go2rtc.json"]

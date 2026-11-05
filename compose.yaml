@@ -1,0 +1,79 @@
+name: chickatrice-wall
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+services:
+  config-init:
+    <<: *hardening
+    image: chickatrice-wall:local
+    build: .
+    command: [node, src/cli.mjs, generate]
+    environment:
+      CAMERA_HOST_ALLOWLIST: ${CAMERA_HOST_ALLOWLIST:-}
+      GO2RTC_PASSWORD: ${GO2RTC_PASSWORD:?Run npm run setup first}
+      RTSP_PASSWORD: ${RTSP_PASSWORD:?Run setup first}
+      MEDIA_HOST: ${MEDIA_HOST:?Set Docker host LAN IPv4}
+    volumes:
+      - ./config/cameras.json:/config/cameras.json:ro
+      - engine-config:/generated
+    network_mode: none
+    mem_limit: 128m
+  go2rtc:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.go2rtc
+    restart: unless-stopped
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    volumes:
+      - engine-config:/config:ro
+    ports:
+      - "${MEDIA_BIND_ADDRESS:-0.0.0.0}:8555:8555/tcp"
+      - "${MEDIA_BIND_ADDRESS:-0.0.0.0}:8555:8555/udp"
+    networks: [streaming]
+    mem_limit: 512m
+  gateway:
+    <<: *hardening
+    image: chickatrice-wall:local
+    build: .
+    restart: unless-stopped
+    init: true
+    depends_on:
+      go2rtc:
+        condition: service_started
+    environment:
+      LOGIN_PATH: ${LOGIN_PATH:-}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+      SYNC_ENGINE: "1"
+      RTSP_PROXY: "1"
+      GO2RTC_URL: http://go2rtc:1984
+      CAMERA_HOST_ALLOWLIST: ${CAMERA_HOST_ALLOWLIST:-}
+      GO2RTC_PASSWORD: ${GO2RTC_PASSWORD:?Run npm run setup first}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8080:8080"
+      - "${RTSP_BIND_ADDRESS:-127.0.0.1}:8554:8554"
+    volumes:
+      - ./config/cameras.json:/config/cameras.json:ro
+      - wall-data:/data
+    networks: [streaming]
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, node, -e, "require('http').get('http://127.0.0.1:8080/healthz',{headers:{host:new URL(process.env.APP_ORIGIN).host}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  wall-data:
+  engine-config:
+networks:
+  streaming:

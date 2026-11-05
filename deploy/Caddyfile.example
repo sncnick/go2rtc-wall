@@ -1,0 +1,4 @@
+# Run Caddy on the Docker host. Set APP_ORIGIN=https://wall.example.com.
+wall.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
