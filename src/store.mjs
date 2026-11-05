@@ -24,6 +24,7 @@ export function openStore(path = process.env.DB_FILE || 'data/wall.sqlite') {
     CREATE TABLE IF NOT EXISTS access_log (id INTEGER PRIMARY KEY, time TEXT NOT NULL, ip TEXT NOT NULL, peer TEXT NOT NULL, ip_source TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, status INTEGER NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS access_time ON access_log(time);
     CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS shares (id TEXT PRIMARY KEY, digest TEXT UNIQUE NOT NULL, camera TEXT NOT NULL, label TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, creator TEXT NOT NULL REFERENCES users(name) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time TEXT NOT NULL, actor TEXT NOT NULL, event TEXT NOT NULL);
   `);
   return db;

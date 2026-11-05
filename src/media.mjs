@@ -2,19 +2,28 @@ import {WebSocketServer,WebSocket} from 'ws';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 export const CODECS=['avc1.640029','avc1.64002A','avc1.640033','hvc1.1.6.L153.B0','mp4a.40.2','mp4a.40.5','flac','opus'];
-export function mseGateway(server,{origin,ids,authenticate,valid,upstream,secret,entrance,recordAccess}) {
+export function mseGateway(server,{origin,ids,authenticate,valid,upstream,secret,entrance,recordAccess,shares}) {
   const wss=new WebSocketServer({noServer:true,maxPayload:1024,perMessageDeflate:false});
   server.on('upgrade',(req,socket,head)=>{
     const log=recordAccess(req,'websocket');
     const reject=()=>{log.finish(403);socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');};
     const match=(req.url.startsWith(entrance)?'/'+req.url.slice(entrance.length):'').match(/^\/api\/mse\/([a-z][a-z0-9_-]{0,47})$/);
-    const session=authenticate(req);
-    if(req.headers.host!==new URL(origin).host||req.headers.origin!==origin||!session||!match||!ids.has(match[1])||wss.clients.size>=128)return reject();
+    const shared=req.url.match(/^\/share\/([a-f0-9]{64})\/mse$/);
+    const grant=shared?shares?.resolve(shared[1]):null;
+    const session=shared?null:authenticate(req);
+    const id=grant?.camera||match?.[1];
+    if(req.headers.host!==new URL(origin).host||wss.clients.size>=128||!ids.has(id))return reject();
+    if(shared?!grant:(!session||!match||req.headers.origin!==origin))return reject();
+    const release=shared?shares.acquire(grant):()=>{};if(!release)return reject();
+    let upgraded=false;
+    const failedUpgrade=()=>{if(!upgraded){release();log.finish(400);}};
+    socket.once('close',failedUpgrade);
     wss.handleUpgrade(req,socket,head,client=>{
-      log.finish(101,session.name);
+      upgraded=true;socket.removeListener('close',failedUpgrade);
+      log.finish(101,shared?'share:'+grant.id:session.name);
       let remote;let started=false;let closed=false;
-      const close=()=>{if(closed)return;closed=true;clearInterval(lease);clearTimeout(startDeadline);client.terminate();remote?.terminate();};
-      const lease=setInterval(()=>{if(!valid(session))close();},5000);
+      const close=()=>{if(closed)return;closed=true;release();clearInterval(lease);clearTimeout(startDeadline);client.terminate();remote?.terminate();};
+      const lease=setInterval(()=>{if(shared?!shares.valid(grant):!valid(session))close();},5000);
       const startDeadline=setTimeout(()=>{if(!started)close();},5000);
       client.on('error',close);client.on('close',close);
       client.on('message',(data,binary)=>{
@@ -22,7 +31,7 @@ export function mseGateway(server,{origin,ids,authenticate,valid,upstream,secret
         try {m=JSON.parse(data);}catch{return close();}
         if(m.type!=='mse'||typeof m.value!=='string'||!m.value||Object.keys(m).sort().join(',')!=='type,value'||m.value.split(',').some(c=>!CODECS.includes(c)))return close();
         started=true;clearTimeout(startDeadline);
-        const url=new URL('/api/ws?src='+encodeURIComponent(match[1]),upstream);url.protocol=url.protocol==='https:'?'wss:':'ws:';
+        const url=new URL('/api/ws?src='+encodeURIComponent(id),upstream);url.protocol=url.protocol==='https:'?'wss:':'ws:';
         remote=new WebSocket(url,{headers:{Authorization:'Basic '+Buffer.from('gateway:'+secret).toString('base64')},handshakeTimeout:10000,maxPayload:8*1024*1024,perMessageDeflate:false});
         remote.on('open',()=>remote.send(JSON.stringify({type:'mse',value:m.value})));
         remote.on('message',(data,binary)=>{

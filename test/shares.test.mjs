@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import {once} from 'node:events';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {WebSocket,WebSocketServer} from 'ws';
+import {createApp} from '../src/server.mjs';
+import {openStore,setUser,digest} from '../src/store.mjs';
+import {safePath} from '../src/access.mjs';
+const listen=async s=>{s.listen(0,'127.0.0.1');await once(s,'listening');return s.address().port;};
+test('Shares are admin-only scoped capabilities; expire/revoke closes FLV and MSE',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'wall-sharing-'));const db=openStore(join(dir,'db'));
+  await setUser(db,'admin','a-long-admin-password','admin');await setUser(db,'viewer','a-long-viewer-password','viewer');
+  let lastStream='',flvSource='',received;
+  const upstream=http.createServer((req,res)=>{flvSource=req.url;res.writeHead(200,{'Content-Type':'video/x-flv'});res.write('FLV');const timer=setInterval(()=>res.write('data'),50);res.on('close',()=>clearInterval(timer));});
+  const wss=new WebSocketServer({server:upstream});wss.on('connection',(ws,req)=>{lastStream=req.url;ws.on('message',data=>{received=JSON.parse(data);ws.send(JSON.stringify({type:'mse',value:'video/mp4; codecs="avc1.640029"'}));});});
+  const up=await listen(upstream);const app=await createApp({db,list:[{id:'front',name:'Front',url:'rtsp://user:camera-secret@192.168.1.4/live'}],upstream:`http://127.0.0.1:${up}`});const port=await listen(app);
+  const request=(path,method='GET',value,headers={})=>new Promise((resolve,reject)=>{const r=http.request({host:'127.0.0.1',port,path,method,headers:{host:'localhost:8080',origin:'http://localhost:8080','content-type':'application/json',...headers}},res=>{let text='';res.on('data',c=>text+=c);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,text}));});r.on('error',reject);r.end(value?JSON.stringify(value):undefined);});
+  const login=async name=>{const r=await request(app.entrance+'api/login','POST',{username:name,password:`a-long-${name}-password`});return {cookie:r.headers['set-cookie'][0].split(';')[0],'x-csrf-token':JSON.parse(r.text).csrf};};
+  const body={camera:'front',label:'Partner site',hours:24};let streamRequest;
+  try{
+    const admin=await login('admin'),viewer=await login('viewer');const route=app.entrance+'api/shares';
+    assert.equal((await request(route,'POST',body,viewer)).status,403);assert.equal((await request(route,'POST',body,{cookie:admin.cookie})).status,403);
+    assert.equal((await request(route,'POST',{...body,camera:'exec:bad'},admin)).status,400);assert.equal((await request(route,'POST',{...body,hours:9999},admin)).status,400);
+    const response=await request(route,'POST',body,admin);assert.equal(response.status,201);const share=JSON.parse(response.text),path=new URL(share.page).pathname,raw=path.split('/')[2];
+    assert.ok(!response.text.includes(app.entrance));assert.ok(!response.text.includes('camera-secret'));
+    const stored=db.prepare('SELECT * FROM shares WHERE id=?').get(share.id);assert.equal(stored.digest,digest(raw));assert.ok(!JSON.stringify(stored).includes(raw));
+    assert.equal((await request(route,'GET',undefined,viewer)).status,403);assert.ok(!(await request(route,'GET',undefined,admin)).text.includes(raw));
+    const page=await request(path);assert.equal(page.status,200);assert.match(page.headers['content-security-policy'],/frame-ancestors \*/);assert.ok(!page.text.includes(app.entrance));
+    assert.equal((await request(path+'info')).status,200);assert.equal((await request(path+'stream.flv?src=other')).status,400);
+    assert.equal((await request(path+'api/config')).status,404);assert.equal((await request(app.entrance+'api/cameras','GET',undefined,{Authorization:'Bearer '+raw})).status,401);
+    const options=await request(path+'stream.flv','OPTIONS',undefined,{origin:'https://partner.example'});assert.equal(options.status,204);assert.equal(options.headers['access-control-allow-origin'],'*');assert.equal(options.headers['access-control-allow-credentials'],undefined);
+    const ws=new WebSocket(`ws://127.0.0.1:${port}${path}mse`,{headers:{host:'localhost:8080',origin:'https://partner.example'}});await once(ws,'open');ws.send(JSON.stringify({type:'mse',value:'avc1.640029'}));await once(ws,'message');assert.equal(lastStream,'/api/ws?src=front');assert.equal(received.type,'mse');
+    let streamResponse;await new Promise((resolve,reject)=>{streamRequest=http.get({host:'127.0.0.1',port,path:path+'stream.flv',headers:{host:'localhost:8080'}},res=>{streamResponse=res;res.on('data',()=>resolve());});streamRequest.on('error',reject);});assert.equal(flvSource,'/api/stream.flv?src=front');
+    const socketClosed=once(ws,'close');const streamClosed=new Promise(resolve=>streamResponse.once('close',resolve));
+    assert.equal((await request(route+'/'+share.id+'/revoke','POST',undefined,admin)).status,200);await Promise.all([socketClosed,streamClosed]);
+    assert.equal((await request(path)).status,404);
+    const second=JSON.parse((await request(route,'POST',body,admin)).text);db.prepare('UPDATE shares SET expires=? WHERE id=?').run(Date.now()-1,second.id);assert.equal((await request(new URL(second.page).pathname+'info')).status,404);
+    const bad=new WebSocket(`ws://127.0.0.1:${port}${path}mse`,{headers:{host:'localhost:8080',origin:'https://partner.example'}});bad.on('error',()=>{});const [,denied]=await once(bad,'unexpected-response');assert.equal(denied.statusCode,403);denied.resume();bad.terminate();
+    const rows=db.prepare('SELECT * FROM access_log').all();assert.ok(!JSON.stringify(rows).includes(raw));assert.equal(safePath(path+'mse',app.entrance),'/share/[token]/mse');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM shares').get().n,2);
+  }finally{streamRequest?.destroy();for(const client of wss.clients)client.terminate();wss.close();app.closeAllConnections();await new Promise(r=>app.close(r));upstream.closeAllConnections();await new Promise(r=>upstream.close(r));db.close();rmSync(dir,{recursive:true,force:true});}
+});

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {sharing} from './shares.mjs';
 import {accessLogger,trustedIPs} from './access.mjs';
 import {mseGateway,flvStream} from './media.mjs';
 import {rtspProxy} from './rtsp-proxy.mjs';
@@ -26,7 +27,7 @@ async function body(req,limit=65536) {
   for await (const chunk of req) { size+=chunk.length; if(size>limit) throw fail(413,'Request too large'); data+=chunk; }
   return data;
 }
-export async function createApp({db=openStore(),list=cameras(),origin=process.env.APP_ORIGIN || 'http://localhost:8080',upstream=process.env.GO2RTC_URL || 'http://127.0.0.1:1984',secret=process.env.GO2RTC_PASSWORD || '',syncEngine=process.env.SYNC_ENGINE==='1',entrance=process.env.LOGIN_PATH,proxyIPs=process.env.TRUSTED_PROXY_IPS||''}={}) {
+export async function createApp({db=openStore(),list=cameras(),origin=process.env.APP_ORIGIN || 'http://localhost:8080',upstream=process.env.GO2RTC_URL || 'http://127.0.0.1:1984',secret=process.env.GO2RTC_PASSWORD || '',syncEngine=process.env.SYNC_ENGINE==='1',entrance=process.env.LOGIN_PATH,proxyIPs=process.env.TRUSTED_PROXY_IPS||'',rtspBase=process.env.RTSP_PUBLIC_BASE}={}) {
   if(!entrance){const stored=db.prepare("SELECT value FROM settings WHERE name='login_path'").get();entrance=stored?JSON.parse(stored.value):'/'+token().slice(0,40)+'/';if(!stored)db.prepare("INSERT INTO settings VALUES('login_path',?)").run(JSON.stringify(entrance));}
   if(!/^\/[a-zA-Z0-9_-]{24,80}\/$/.test(entrance))throw Error('LOGIN_PATH must be / followed by 24–80 URL-safe characters and a trailing /');
   const recordAccess=accessLogger(db,entrance,trustedIPs(proxyIPs));
@@ -36,6 +37,7 @@ export async function createApp({db=openStore(),list=cameras(),origin=process.en
   if(saved)list=validateCameras(JSON.parse(saved.value));
   else db.prepare("INSERT INTO settings VALUES('cameras',?)").run(JSON.stringify(list));
   const ids=new Set(list.map(c=>c.id)); const dummy=await hashPassword(token());
+  const shares=sharing({db,ids,list,origin,upstream,secret,rtspBase});
   const attempts=new Map(); let activeLogins=0; let activeOffers=0;
   const cleanup=setInterval(()=>{const now=Date.now();for(const [key,v] of attempts) if(v.until<now)attempts.delete(key);db.prepare('DELETE FROM sessions WHERE expires<?').run(now);db.prepare('DELETE FROM access_log WHERE time<?').run(new Date(now-30*86400000).toISOString());},60000); cleanup.unref();
   const cookieName=secure?'__Host-wall':'wall';
@@ -76,6 +78,7 @@ export async function createApp({db=openStore(),list=cameras(),origin=process.en
     try {
       if(req.headers.host!==publicURL.host)return send(403,blocked,'text/html; charset=utf-8');
       const url=new URL(req.url,origin);
+      if(await shares.handle(req,res,url,send,value=>{actor=value;}))return;
       if(req.method==='GET'&&url.pathname==='/notice.css')return send(200,blockedCSS,'text/css');
       if(req.method==='GET'&&url.pathname==='/healthz')return send(200,{ok:true});
       if(req.method==='GET'&&url.pathname===entrance.slice(0,-1)&&!url.search){res.setHeader('Location',entrance);return send(308,'','text/plain');}
@@ -108,6 +111,17 @@ export async function createApp({db=openStore(),list=cameras(),origin=process.en
       if(req.method!=='GET' && req.headers['x-csrf-token']!==session.csrf)throw fail(403,'Invalid CSRF token');
       if(req.method==='GET' && path==='/api/session')return send(200,{name:session.name,role:session.role,csrf:session.csrf});
       if(req.method==='POST' && path==='/api/logout'){db.prepare('DELETE FROM sessions WHERE id=?').run(session.id);audit(db,session.name,'logout');res.setHeader('Set-Cookie',cookie('',0));return send(200,{ok:true});}
+      if(path==='/api/shares'||/^\/api\/shares\/[a-f0-9]{24}\/revoke$/.test(path)){
+        if(session.role!=='admin')throw fail(403,'Administrator required');
+        if(req.method==='GET'&&path==='/api/shares')return send(200,shares.list());
+        if(req.method==='POST'&&path==='/api/shares'){
+          if(req.headers['content-type']!=='application/json')throw fail(415,'JSON required');
+          limit('share-create:'+session.name,30,60000);
+          return send(201,shares.create(JSON.parse(await body(req,2048)),session.name));
+        }
+        if(req.method==='POST'&&path.endsWith('/revoke')){shares.revoke(path.split('/')[3],session.name);return send(200,{ok:true});}
+        throw fail(405,'Method not allowed');
+      }
       if(req.method==='POST' && path==='/api/cameras'){
         if(session.role!=='admin')throw fail(403,'Administrator required');
         if(req.headers['content-type']!=='application/json')throw fail(415,'JSON required');
@@ -168,7 +182,7 @@ export async function createApp({db=openStore(),list=cameras(),origin=process.en
       throw fail(404,'Not found');
     }catch(e){if(!res.headersSent)send(e.status||(e instanceof SyntaxError?400:500),{error:e.status?e.message:e instanceof SyntaxError?'Invalid JSON':'Server error'});else res.end();}
   });
-  mseGateway(server,{origin,ids,authenticate,valid,upstream,secret,entrance,recordAccess});
+  mseGateway(server,{origin,ids,authenticate,valid,upstream,secret,entrance,recordAccess,shares});
   server.on('clientError',(_error,socket)=>{const log=recordAccess({socket,headers:{},method:'INVALID',url:'[malformed]'},'http');log.finish(400);if(socket.writable)socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');});
   server.requestTimeout=20000;server.headersTimeout=10000;server.timeout=25000;server.maxHeadersCount=30;
   server.entrance=entrance;server.recordAccess=recordAccess;server.cameraIds=ids;server.on('close',()=>{clearInterval(cleanup);clearInterval(reconcile);});return server;

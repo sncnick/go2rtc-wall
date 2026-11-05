@@ -51,6 +51,7 @@ services:
       go2rtc:
         condition: service_started
     environment:
+      RTSP_PUBLIC_BASE: ${RTSP_PUBLIC_BASE:-}
       LOGIN_PATH: ${LOGIN_PATH:-}
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}

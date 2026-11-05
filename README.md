@@ -2,6 +2,8 @@
 
 以 Docker Compose 部署的登入閘道、可拖拉 TV Wall 與 go2rtc 影音服務。網頁不提供原生 YAML 編輯器或任意命令輸入。
 
+接手開發／部署請先閱讀 [HANDOFF.md](HANDOFF.md)。
+
 ## 啟動
 
 需要 Docker Engine / Docker Desktop 與 Compose v2。Node.js 24 僅用於本機開發；正式執行全部在 Docker。
@@ -37,7 +39,7 @@ docker compose run --rm --no-deps gateway node src/cli.mjs user admin admin
 docker compose run --rm --no-deps gateway node src/cli.mjs user operator viewer
 ```
 
-同名更新會使該帳號所有 session 失效。管理員可看審計記錄；兩種角色均可觀看所有已批准的攝影機及管理自己的版面。管理員介面只提供「新增 RTSP」（名稱＋網址），不顯示詳細設定或原始 YAML；帳號管理仍限主機終端操作。第一版未包含 MFA、OIDC 或逐攝影機 ACL。
+同名更新會使該帳號所有 session 失效。管理員可看審計記錄；兩種角色均可觀看所有已批准的攝影機及管理自己的版面。管理員可「新增 RTSP」（名稱＋網址）及「分享／轉發」，不顯示 go2rtc 詳細設定或原始 YAML；帳號管理仍限主機終端操作。第一版未包含 MFA、OIDC 或逐攝影機 ACL。
 
 ## 播放及轉發
 
@@ -47,7 +49,7 @@ docker compose run --rm --no-deps gateway node src/cli.mjs user operator viewer
 |---|---|---|
 | WebRTC | 登入後 SDP 交換，DTLS/SRTP 媒體 | 需可到達 Docker 主機 8555 TCP/UDP；編碼由瀏覽器協商 |
 | MSE | 登入 WebSocket → fMP4 → MediaSource | H.264 常見；H.265 取決於瀏覽器／硬體 |
-| HTTP-FLV | 受 session 保護的 FLV endpoint + 本機 mpegts.js | 建議 H.264/AAC；不把 FLV URL 變成匿名公開分享 |
+| HTTP-FLV | 受 session 保護的 FLV endpoint + 本機 mpegts.js | 建議 H.264/AAC；外部播放使用下方獨立分享憑證 |
 | RTSP relay | 只讀 TCP 協定閘道 → go2rtc | VLC / NVR 等外部播放器，帳號 `relay`，使用 `.env` 的獨立 `RTSP_PASSWORD` |
 
 RTSP 連線格式是 `rtsp://HOST:8554/CAMERA_ID`；在 VLC 輸入帳號密碼並使用 RTSP over TCP。預設只綁定 `127.0.0.1`。要給 LAN NVR 使用，在 `.env` 設 `RTSP_BIND_ADDRESS` 為主機 LAN 位址，再重新建立 gateway。不要把原生 go2rtc 的 1984 或 8554 直接公開。
@@ -55,6 +57,37 @@ RTSP 連線格式是 `rtsp://HOST:8554/CAMERA_ID`；在 VLC 輸入帳號密碼�
 RTSP 共享整合帳密與 Web 帳號分開，無逐使用者權限，適合受信任 NVR。只讀閘道拒絕 ANNOUNCE、RECORD、任意 query、任意來源與 UDP SETUP。原生 RTSP 並非加密傳輸，遠端使用 VPN。改動 RTSP 密碼後重建 go2rtc 及 gateway 以中斷舊連線。
 
 **這些模式主要是轉封裝／轉發，不會自動把 H.265 重新編碼成 H.264。** 此版為消除任意指令入口，不啟用 FFmpeg／exec。需要轉碼時，應另加固定參數的轉碼 worker，再把其 RTSP 輸出加入清單；不能直接開放 `ffmpeg:` 或命令文字欄位。HLS、錄影、雙向對講不在此版範圍。
+
+## 複製分享連結／嵌入網站
+
+管理員按頂部「分享／轉發」或畫面上的 ↗，選擇攝影機、備註及期限（1 小時／24 小時／7 日／30 日），按「建立播放連結」。可複製：
+
+- **MSE／FLV 播放頁**：無需 Web 帳號，頁內可以切換 MSE／FLV，適合分享或 iframe 嵌入。
+- **HTTP-FLV 串流網址**：供支援 FLV 的播放器拉取。原生 HTML `<video>` 一般不能直接播放 FLV，網頁端需 mpegts.js 等播放器。
+- **MSE WebSocket 地址**：供採用 go2rtc `mse` 訊息協定的播放器使用；不是一般 `<video src>` 網址。
+- **iframe 嵌入碼**：分享頁可被其他網站嵌入；管理頁仍禁止 iframe。
+- **RTSP 轉發地址**：不含密碼，另使用 `relay` 與主機上的 `RTSP_PASSWORD`，以 TCP 拉流。
+
+分享連結是 bearer capability：任何取得連結的人均可觀看**指定的一個來源**，可轉傳或錄下畫面；不是 DRM。分享不授權管理 API、不依賴登入 Cookie，也不暴露來源 URL 或私人登入路徑。HTTPS 下跨站使用 CORS `*`（不允許 credentials），WebSocket 也允許跨站攜帶有效憑證。需要只限特定網站／逐觀眾身份驗證者，應另加 origin allowlist 或觀眾登入，不能把這版當成防轉傳方案。
+
+完整分享連結只在建立時顯示一次。伺服器只儲存 token 的 SHA-256；關閉視窗後無法重取，遺失時撤銷並建立新連結。按「撤銷」後，新連線立即被拒絕，現有 MSE／FLV 連線在 5 秒內中斷。到期亦同。分享設定保留於 `wall-data`，Docker 重啟不會使未到期連結失效；分享者被刪除或降為 viewer 時連結失效。重設分享者密碼不會自動撤銷分享。
+
+每個分享最多 8 條媒體連線、所有分享合計最多 64 條；最多 200 個有效分享，歷史最多 2,000 筆，到期超過 30 日的記錄在建立新分享時清理。使用者觀看數較多時應部署專用媒體分發服務；此版未做大規模負載測試。
+
+外部接收者不能使用你的 `localhost`。先設定 HTTPS 網域、反向代理及 `APP_ORIGIN=https://wall.example.com`，再建立可供外部連入的分享。MSE／FLV 使用該 HTTPS 入口，不需要 8555 WebRTC 埠。切換網域後舊網址需更新其主機部分；token 不變且仍受原期限限制。
+
+RTSP 若有不同域名／對外映射埠，在 `.env` 設定：
+
+```ini
+RTSP_PUBLIC_BASE=rtsp://stream.example.com:8554
+RTSP_BIND_ADDRESS=192.168.1.20
+```
+
+`RTSP_PUBLIC_BASE` 只決定 UI 複製的地址，不會自動開放埠、設定 DNS 或 NAT。`RTSP_BIND_ADDRESS` 必須是 Docker 主機可綁定的位址，保持帳密及防火牆限制。RTSP 仍是獨立共享整合帳密，撤銷 Web 分享**不會**撤銷 RTSP；需要停用時輪替 RTSP 密碼並重啟相關服務。
+
+應用程式 log 將 `/share/<token>/...` 遮蔽為 `/share/[token]/...`，但反向代理、CDN、瀏覽器歷史可能保留原始 URL。代理／CDN 的 access log 也必須移除或遮蔽分享憑證，且不能快取 `/share/*`（尤其是 FLV）。
+
+本版提供 **pull／嵌入分享**，不會主動推送至 YouTube／Facebook 的 RTMP／RTMPS，也不會重新編碼。這兩項留待接手者按實際平台和固定轉碼設定實作。
 
 ## LAN / HTTPS
 

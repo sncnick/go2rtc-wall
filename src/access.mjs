@@ -24,6 +24,7 @@ export function clientAddress(req,trusted=new Set()) {
 }
 export function safePath(raw,entrance) {
   let path=String(raw||'/').split(/[?#]/)[0];
+  path=path.replace(/(\/share\/)[^/]+/g,'$1[token]');
   if(entrance)path=path.replaceAll(entrance.slice(0,-1),'[entry]');
   // Do not retain URL credentials or other attacker-supplied absolute source URLs.
   path=path.replace(/(?:rtsp|rtsps|https?):\/\/.*$/i,'[url]');
